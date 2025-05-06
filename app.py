@@ -50,6 +50,7 @@ def main():
           border: 1px solid #ddd;
           padding: 10px;
           margin-bottom: 20px;
+          background-color: white;
         }
         .glycan-item {
           margin-bottom: 15px;
