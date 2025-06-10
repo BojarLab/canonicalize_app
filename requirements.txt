@@ -1,2 +1,2 @@
 streamlit
-glycowork==1.6
+glycowork==1.6.2
