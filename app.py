@@ -18,7 +18,24 @@ def main():
 
   if st.button("Convert"):
     if input_text:
-      input_sequences = input_text.strip().split("\n")
+      lines = input_text.strip().split("\n")
+      input_sequences = []
+      i = 0
+      while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+          i += 1
+          continue
+        if line.startswith("RES"):
+          glycoct_lines = [line]
+          i += 1
+          while i < len(lines) and lines[i].strip():
+            glycoct_lines.append(lines[i].strip())
+            i += 1
+          input_sequences.append("\n".join(glycoct_lines))
+        else:
+          input_sequences.append(line)
+          i += 1
       output_sequences = []
       svg_drawings = []
 
