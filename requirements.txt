@@ -1,2 +1,2 @@
 streamlit
-git+https://github.com/BojarLab/glycowork.git@dev
+glycowork==1.6.3
