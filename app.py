@@ -4,6 +4,8 @@ from glycowork.motif.processing import canonicalize_iupac
 from glycowork.motif.draw import GlycoDraw
 import base64
 from io import BytesIO
+import zipfile
+import re
 
 def svg_to_base64(svg_obj):
   """Convert an SVG object to base64 for embedding in HTML"""
@@ -46,16 +48,17 @@ def main():
             output_sequences.append(canonical)
             try:
               drawing = GlycoDraw(canonical, suppress=True)
-              svg_drawings.append((canonical, svg_to_base64(drawing)))
+              svg_drawings.append((canonical, svg_to_base64(drawing), drawing.as_svg()))
             except Exception as e:
-              svg_drawings.append((canonical, None))
+              svg_drawings.append((canonical, None, None))
           except Exception as e:
             output_sequences.append(f"Error with '{seq}': {str(e)}")
-            svg_drawings.append((seq, None))
+            svg_drawings.append((seq, None, None))
 
       st.text_area("Canonicalized Sequences", "\n".join(output_sequences), height=200)
+      
       # Display drawings in a scrollable area if any drawings were created
-      if any(drawing for _, drawing in svg_drawings):
+      if any(drawing for _, drawing, _ in svg_drawings):
         st.markdown("### Glycan Visualizations using GlycoDraw")
 
         # Create a scrollable area for the drawings
@@ -79,14 +82,29 @@ def main():
 
         # Start the container
         glycan_html = '<div class="glycan-container">'
-
-        for sequence, drawing in svg_drawings:
+        for sequence, drawing, _ in svg_drawings:
           if drawing:
             glycan_html += f'<div class="glycan-item"><p><b>{sequence}</b></p>'
             glycan_html += f'<img src="data:image/svg+xml;base64,{drawing}" alt="{sequence}" style="max-width:100%;"/></div>'
-
         glycan_html += '</div>'
         st.markdown(glycan_html, unsafe_allow_html=True)
+        
+        # Create download all button
+        valid_svgs = [(seq, svg_content) for seq, _, svg_content in svg_drawings if svg_content]
+        if valid_svgs:
+          zip_buffer = BytesIO()
+          with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for i, (sequence, svg_content) in enumerate(valid_svgs):
+              safe_filename = re.sub(r'[^\w\-_\.]', '_', sequence)[:50]
+              filename = f"glycan_{i+1:03d}_{safe_filename}.svg"
+              zip_file.writestr(filename, svg_content)
+          zip_buffer.seek(0)
+          st.download_button(
+            label="Download All SVGs as ZIP",
+            data=zip_buffer.getvalue(),
+            file_name="glycan_structures.zip",
+            mime="application/zip"
+          )
     else:
       st.error("Please enter at least one sequence.")
 
