@@ -1,2 +1,3 @@
 streamlit
 git+https://github.com/BojarLab/glycowork.git@dev
+glycorender~=0.2.3
