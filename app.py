@@ -2,7 +2,7 @@ import streamlit as st
 import urllib.parse
 from glycowork.motif.processing import canonicalize_iupac
 from glycowork.motif.draw import GlycoDraw
-from glycorender.render import convert_svg_to_pdf, convert_svg_to_png
+from glycorender.render import convert_svg_to_pdf, convert_svg_to_png, pdf_to_svg_bytes
 import base64
 from io import BytesIO
 import zipfile
@@ -57,18 +57,19 @@ def main():
             try:
               drawing = GlycoDraw(canonical, suppress=True)
               svg_string = drawing.as_svg()
-              png_b64 = png_to_base64(svg_string)
-              svg_drawings.append((canonical, png_b64, svg_string))
+              rendered_svg = pdf_to_svg_bytes(svg_string)
+              svg_b64 = base64.b64encode(rendered_svg.encode("utf-8")).decode("utf-8")
+              svg_drawings.append((canonical, svg_b64, rendered_svg, svg_string))
             except Exception as e:
-              svg_drawings.append((canonical, None, None))
+              svg_drawings.append((canonical, None, None, None))
           except Exception as e:
             output_sequences.append(f"Error with '{seq}': {str(e)}")
-            svg_drawings.append((seq, None, None))
+            svg_drawings.append((seq, None, None, None))
 
       st.text_area("Canonicalized Sequences", "\n".join(output_sequences), height=200)
       
       # Display drawings in a scrollable area if any drawings were created
-      if any(drawing for _, drawing, _ in svg_drawings):
+      if any(drawing for _, drawing, _, _ in svg_drawings):
         st.markdown("### Glycan Visualizations using GlycoDraw")
 
         # Create a scrollable area for the drawings
@@ -92,15 +93,15 @@ def main():
 
         # Start the container
         glycan_html = '<div class="glycan-container">'
-        for sequence, drawing, _ in svg_drawings:
+        for sequence, drawing, _, _ in svg_drawings:
           if drawing:
             glycan_html += f'<div class="glycan-item"><p><b>{sequence}</b></p>'
-            glycan_html += f'<img src="data:image/png;base64,{drawing}" alt="{sequence}" style="max-width:100%;"/></div>'
+            glycan_html += f'<img src="data:image/svg+xml;base64,{svg_b64}" alt="{sequence}" style="max-width:100%;"/></div>'
         glycan_html += '</div>'
         st.markdown(glycan_html, unsafe_allow_html=True)
         
         # Create download all button
-        valid_pdfs = [(seq, svg_content) for seq, _, svg_content in svg_drawings if svg_content]
+        valid_pdfs = [(seq, svg_content) for seq, _, _, svg_content in svg_drawings if svg_content]
         if valid_pdfs:
           zip_buffer = BytesIO()
           with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
