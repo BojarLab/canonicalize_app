@@ -2,15 +2,23 @@ import streamlit as st
 import urllib.parse
 from glycowork.motif.processing import canonicalize_iupac
 from glycowork.motif.draw import GlycoDraw
+from glycorender.render import convert_svg_to_pdf, convert_svg_to_png
 import base64
 from io import BytesIO
 import zipfile
 import re
+import tempfile
+import os
 
 def svg_to_base64(svg_obj):
   """Convert an SVG object to base64 for embedding in HTML"""
   svg_string = svg_obj.as_svg()
   return base64.b64encode(svg_string.encode("utf-8")).decode("utf-8")
+
+def png_to_base64(svg_string):
+  """Convert SVG to PNG bytes and encode as base64"""
+  png_bytes = convert_svg_to_png(svg_string, None, output_width=800, output_height=800, scale=2.0, return_bytes=True)
+  return base64.b64encode(png_bytes).decode("utf-8")
 
 def main():
   st.title("Glycan Sequence Canonicalizer")
@@ -48,7 +56,9 @@ def main():
             output_sequences.append(canonical)
             try:
               drawing = GlycoDraw(canonical, suppress=True)
-              svg_drawings.append((canonical, svg_to_base64(drawing), drawing.as_svg()))
+              svg_string = drawing.as_svg()
+              png_b64 = png_to_base64(svg_string)
+              svg_drawings.append((canonical, png_b64, svg_string))
             except Exception as e:
               svg_drawings.append((canonical, None, None))
           except Exception as e:
@@ -85,22 +95,31 @@ def main():
         for sequence, drawing, _ in svg_drawings:
           if drawing:
             glycan_html += f'<div class="glycan-item"><p><b>{sequence}</b></p>'
-            glycan_html += f'<img src="data:image/svg+xml;base64,{drawing}" alt="{sequence}" style="max-width:100%;"/></div>'
+            glycan_html += f'<img src="data:image/png;base64,{drawing}" alt="{sequence}" style="max-width:100%;"/></div>'
         glycan_html += '</div>'
         st.markdown(glycan_html, unsafe_allow_html=True)
         
         # Create download all button
-        valid_svgs = [(seq, svg_content) for seq, _, svg_content in svg_drawings if svg_content]
-        if valid_svgs:
+        valid_pdfs = [(seq, svg_content) for seq, _, svg_content in svg_drawings if svg_content]
+        if valid_pdfs:
           zip_buffer = BytesIO()
           with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for i, (sequence, svg_content) in enumerate(valid_svgs):
+            for i, (sequence, svg_content) in enumerate(valid_pdfs):
               safe_filename = re.sub(r'[^\w\-_\.]', '_', sequence)[:50]
-              filename = f"glycan_{i+1:03d}_{safe_filename}.svg"
-              zip_file.writestr(filename, svg_content)
+              with tempfile.NamedTemporaryFile(mode='wb', suffix='.pdf', delete=False) as temp_file:
+                temp_pdf_path = temp_file.name
+              try:
+                convert_svg_to_pdf(svg_content, temp_pdf_path)
+                with open(temp_pdf_path, 'rb') as f:
+                  pdf_bytes = f.read()
+                filename = f"glycan_{i+1:03d}_{safe_filename}.pdf"
+                zip_file.writestr(filename, pdf_bytes)
+              finally:
+                if os.path.exists(temp_pdf_path):
+                  os.unlink(temp_pdf_path)
           zip_buffer.seek(0)
           st.download_button(
-            label="Download All SVGs as ZIP",
+            label="Download All PDFs as ZIP",
             data=zip_buffer.getvalue(),
             file_name="glycan_structures.zip",
             mime="application/zip"
