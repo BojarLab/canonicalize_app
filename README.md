@@ -28,10 +28,6 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Optional SMILES Output
-
-Enable the **Include SMILES output** checkbox in the app to convert each canonicalized sequence into SMILES using glycowork’s chem utilities. Structures that still contain undefined elements (for example `Hex`, `HexNAc`, or `?` linkages) are skipped automatically and flagged with a short note in the results table.
-
 ## Deployment
 
 This application is deployed on Streamlit Cloud and is freely accessible at the [canonicalize app](https://canonicalize.streamlit.app/).
@@ -48,4 +44,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Contact
 
 For questions or issues related to this application, please open an issue on this repository.
-For questions about the glycowork package, visit the [glycowork repository](https://github.com/BojarLab/glycowork).
