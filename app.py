@@ -12,14 +12,13 @@ import os
 import pandas as pd
 
 AMBIGUOUS_MONO_TOKENS = (
-  "Hex(",
-  "HexNAc(",
-  "dHex(",
-  "Pen(",
-  "Hex[",
-  "HexNAc[",
-  "dHex[",
-  "Pen["
+  "Hex",
+  "HexNAc",
+  "dHex",
+  "Pen"
+)
+AMBIGUOUS_MONO_PATTERN = re.compile(
+  r"(?<![A-Za-z])(" + "|".join(AMBIGUOUS_MONO_TOKENS) + r")(?![A-Za-z])"
 )
 def build_smiles_row(input_seq, canonical_seq, smiles_value=""):
   """Return a uniform record for the SMILES results table."""
@@ -45,7 +44,7 @@ def has_ambiguous_components(sequence):
     return True
   if any(marker in sequence for marker in ("/", "{", "}")):
     return True
-  return any(token in sequence for token in AMBIGUOUS_MONO_TOKENS)
+  return bool(AMBIGUOUS_MONO_PATTERN.search(sequence))
 
 def main():
   st.title("Glycan Sequence Canonicalizer")
