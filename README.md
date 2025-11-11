@@ -44,3 +44,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Contact
 
 For questions or issues related to this application, please open an issue on this repository.
+For questions about the glycowork package, visit the [glycowork repository](https://github.com/BojarLab/glycowork).
