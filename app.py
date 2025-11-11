@@ -1,6 +1,6 @@
 import streamlit as st
 import urllib.parse
-from glycowork.motif.processing import canonicalize_iupac
+from glycowork.motif.processing import canonicalize_iupac, iupac_to_smiles
 from glycowork.motif.draw import GlycoDraw
 from glycorender.render import convert_svg_to_pdf, convert_svg_to_png, pdf_to_svg_bytes
 import base64
@@ -9,6 +9,24 @@ import zipfile
 import re
 import tempfile
 import os
+import pandas as pd
+
+AMBIGUOUS_MONO_TOKENS = (
+  "Hex(",
+  "HexNAc(",
+  "dHex(",
+  "Pen(",
+  "Hex[",
+  "HexNAc[",
+  "dHex[",
+  "Pen["
+)
+SMILES_TABLE_COLUMNS = (
+  "Input Sequence",
+  "Canonical Sequence",
+  "SMILES",
+  "Notes"
+)
 
 def svg_to_base64(svg_obj):
   """Convert an SVG object to base64 for embedding in HTML"""
@@ -20,11 +38,18 @@ def png_to_base64(svg_string):
   png_bytes = convert_svg_to_png(svg_string, None, output_width=800, output_height=800, scale=2.0, return_bytes=True)
   return base64.b64encode(png_bytes).decode("utf-8")
 
+def has_ambiguous_components(sequence):
+  """Return True if SMILES generation should be skipped due to undefined residues/linkages"""
+  if "?" in sequence:
+    return True
+  return any(token in sequence for token in AMBIGUOUS_MONO_TOKENS)
+
 def main():
   st.title("Glycan Sequence Canonicalizer")
   st.write("Paste your glycan sequences below to canonicalize them (any format should work)")
 
   input_text = st.text_area("Input Sequences (one per line)", height=200)
+  include_smiles = st.checkbox("Include SMILES output for each sequence")
 
   if st.button("Convert"):
     if input_text:
@@ -48,12 +73,30 @@ def main():
           i += 1
       output_sequences = []
       svg_drawings = []
+      smiles_results = []
+      ambiguous_warning = False
 
       for seq in input_sequences:
         if seq.strip():
           try:
             canonical = canonicalize_iupac(seq)
             output_sequences.append(canonical)
+            if include_smiles:
+              smiles_entry = {
+                "Input Sequence": seq,
+                "Canonical Sequence": canonical,
+                "SMILES": "",
+                "Notes": ""
+              }
+              if has_ambiguous_components(canonical):
+                ambiguous_warning = True
+                smiles_entry["Notes"] = "Skipped: ambiguous residue or linkage"
+              else:
+                try:
+                  smiles_entry["SMILES"] = iupac_to_smiles([canonical])[0]
+                except Exception as smiles_exc:
+                  smiles_entry["Notes"] = f"SMILES error: {smiles_exc}"
+              smiles_results.append(smiles_entry)
             try:
               drawing = GlycoDraw(canonical, suppress=True)
               svg_string = drawing.as_svg()
@@ -65,8 +108,42 @@ def main():
           except Exception as e:
             output_sequences.append(f"Error with '{seq}': {str(e)}")
             svg_drawings.append((seq, None, None, None))
+            if include_smiles:
+              smiles_results.append({
+                "Input Sequence": seq,
+                "Canonical Sequence": "",
+                "SMILES": "",
+                "Notes": f"Canonicalization failed: {str(e)}"
+              })
 
-      st.text_area("Canonicalized Sequences", "\n".join(output_sequences), height=200)
+      if include_smiles:
+        if smiles_results:
+          st.markdown("### SMILES Output")
+          smiles_df = pd.DataFrame(smiles_results, columns=SMILES_TABLE_COLUMNS)
+          st.dataframe(
+            smiles_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+              "Input Sequence": st.column_config.TextColumn("Input Sequence"),
+              "Canonical Sequence": st.column_config.TextColumn("Canonical Sequence"),
+              "SMILES": st.column_config.TextColumn("SMILES", help="Full SMILES string, scroll to view entire value"),
+              "Notes": st.column_config.TextColumn("Notes")
+            }
+          )
+          csv_data = smiles_df.to_csv(index=False).encode("utf-8")
+          st.download_button(
+            label="Download SMILES as CSV",
+            data=csv_data,
+            file_name="smiles_output.csv",
+            mime="text/csv"
+          )
+        else:
+          st.info("No SMILES were generated. Check your input and try again.")
+        if ambiguous_warning:
+          st.warning("SMILES generation skips structures with undefined residues or linkages (e.g., Hex, HexNAc, '?').")
+      else:
+        st.text_area("Canonicalized Sequences", "\n".join(output_sequences), height=200)
       
       # Display drawings in a scrollable area if any drawings were created
       if any(drawing for _, drawing, _, _ in svg_drawings):
@@ -96,7 +173,7 @@ def main():
         for sequence, drawing, _, _ in svg_drawings:
           if drawing:
             glycan_html += f'<div class="glycan-item"><p><b>{sequence}</b></p>'
-            glycan_html += f'<img src="data:image/svg+xml;base64,{svg_b64}" alt="{sequence}" style="max-width:100%;"/></div>'
+            glycan_html += f'<img src="data:image/svg+xml;base64,{drawing}" alt="{sequence}" style="max-width:100%;"/></div>'
         glycan_html += '</div>'
         st.markdown(glycan_html, unsafe_allow_html=True)
         
