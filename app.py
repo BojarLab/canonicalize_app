@@ -21,12 +21,13 @@ AMBIGUOUS_MONO_TOKENS = (
   "dHex[",
   "Pen["
 )
-SMILES_TABLE_COLUMNS = (
-  "Input Sequence",
-  "Canonical Sequence",
-  "SMILES",
-  "Notes"
-)
+def build_smiles_row(input_seq, canonical_seq, smiles_value=""):
+  """Return a uniform record for the SMILES results table."""
+  return {
+    "Input Sequence": input_seq,
+    "Canonical Sequence": canonical_seq,
+    "SMILES": smiles_value
+  }
 
 def svg_to_base64(svg_obj):
   """Convert an SVG object to base64 for embedding in HTML"""
@@ -41,6 +42,8 @@ def png_to_base64(svg_string):
 def has_ambiguous_components(sequence):
   """Return True if SMILES generation should be skipped due to undefined residues/linkages"""
   if "?" in sequence:
+    return True
+  if any(marker in sequence for marker in ("/", "{", "}")):
     return True
   return any(token in sequence for token in AMBIGUOUS_MONO_TOKENS)
 
@@ -74,7 +77,8 @@ def main():
       output_sequences = []
       svg_drawings = []
       smiles_results = []
-      ambiguous_warning = False
+      ambiguous_sequences = []
+      smiles_failures = []
 
       for seq in input_sequences:
         if seq.strip():
@@ -82,21 +86,16 @@ def main():
             canonical = canonicalize_iupac(seq)
             output_sequences.append(canonical)
             if include_smiles:
-              smiles_entry = {
-                "Input Sequence": seq,
-                "Canonical Sequence": canonical,
-                "SMILES": "",
-                "Notes": ""
-              }
               if has_ambiguous_components(canonical):
-                ambiguous_warning = True
-                smiles_entry["Notes"] = "Skipped: ambiguous residue or linkage"
+                ambiguous_sequences.append(seq)
+                smiles_results.append(build_smiles_row(seq, canonical))
               else:
                 try:
-                  smiles_entry["SMILES"] = iupac_to_smiles([canonical])[0]
+                  smiles_results.append(
+                    build_smiles_row(seq, canonical, iupac_to_smiles([canonical])[0])
+                  )
                 except Exception as smiles_exc:
-                  smiles_entry["Notes"] = f"SMILES error: {smiles_exc}"
-              smiles_results.append(smiles_entry)
+                  smiles_failures.append(f"SMILES error for '{seq}': {smiles_exc}")
             try:
               drawing = GlycoDraw(canonical, suppress=True)
               svg_string = drawing.as_svg()
@@ -109,39 +108,26 @@ def main():
             output_sequences.append(f"Error with '{seq}': {str(e)}")
             svg_drawings.append((seq, None, None, None))
             if include_smiles:
-              smiles_results.append({
-                "Input Sequence": seq,
-                "Canonical Sequence": "",
-                "SMILES": "",
-                "Notes": f"Canonicalization failed: {str(e)}"
-              })
+              smiles_failures.append(f"Canonicalization failed for '{seq}': {str(e)}")
 
       if include_smiles:
         if smiles_results:
           st.markdown("### SMILES Output")
-          smiles_df = pd.DataFrame(smiles_results, columns=SMILES_TABLE_COLUMNS)
           st.dataframe(
-            smiles_df,
+            pd.DataFrame(smiles_results),
             use_container_width=True,
-            hide_index=True,
-            column_config={
-              "Input Sequence": st.column_config.TextColumn("Input Sequence"),
-              "Canonical Sequence": st.column_config.TextColumn("Canonical Sequence"),
-              "SMILES": st.column_config.TextColumn("SMILES", help="Full SMILES string, scroll to view entire value"),
-              "Notes": st.column_config.TextColumn("Notes")
-            }
-          )
-          csv_data = smiles_df.to_csv(index=False).encode("utf-8")
-          st.download_button(
-            label="Download SMILES as CSV",
-            data=csv_data,
-            file_name="smiles_output.csv",
-            mime="text/csv"
+            hide_index=True
           )
         else:
           st.info("No SMILES were generated. Check your input and try again.")
-        if ambiguous_warning:
-          st.warning("SMILES generation skips structures with undefined residues or linkages (e.g., Hex, HexNAc, '?').")
+        if ambiguous_sequences:
+          sample = ", ".join(ambiguous_sequences[:5])
+          st.warning(
+            "SMILES skipped for sequences with undefined residues or ambiguous bonds (Hex, '?', '/', '{ }'): "
+            + sample + (" ..." if len(ambiguous_sequences) > 5 else "")
+          )
+        if smiles_failures:
+          st.error("\n".join(smiles_failures))
       else:
         st.text_area("Canonicalized Sequences", "\n".join(output_sequences), height=200)
       
