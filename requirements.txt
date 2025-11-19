@@ -1,3 +1,2 @@
 streamlit
-git+https://github.com/BojarLab/glycowork.git@dev#egg=glycowork[chem]
-glycorender~=0.2.3
+glycowork[chem]~=1.7
