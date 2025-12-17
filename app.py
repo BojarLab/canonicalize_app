@@ -114,7 +114,7 @@ def main():
           st.markdown("### SMILES Output")
           st.dataframe(
             pd.DataFrame(smiles_results),
-            use_container_width=True,
+            width='stretch',
             hide_index=True
           )
         else:
