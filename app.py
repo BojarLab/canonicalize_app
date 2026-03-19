@@ -2,7 +2,7 @@ import streamlit as st
 import urllib.parse
 from glycowork.motif.processing import canonicalize_iupac, iupac_to_smiles
 from glycowork.motif.draw import GlycoDraw
-from glycorender.render import convert_svg_to_pdf, convert_svg_to_png, pdf_to_svg_bytes
+from glycorender.render import convert_svg_to_pdf, pdf_to_svg_bytes
 import base64
 from io import BytesIO
 import zipfile
@@ -27,16 +27,6 @@ def build_smiles_row(input_seq, canonical_seq, smiles_value=""):
     "Canonical Sequence": canonical_seq,
     "SMILES": smiles_value
   }
-
-def svg_to_base64(svg_obj):
-  """Convert an SVG object to base64 for embedding in HTML"""
-  svg_string = svg_obj.as_svg()
-  return base64.b64encode(svg_string.encode("utf-8")).decode("utf-8")
-
-def png_to_base64(svg_string):
-  """Convert SVG to PNG bytes and encode as base64"""
-  png_bytes = convert_svg_to_png(svg_string, None, output_width=800, output_height=800, scale=2.0, return_bytes=True)
-  return base64.b64encode(png_bytes).decode("utf-8")
 
 def has_ambiguous_components(sequence):
   """Return True if SMILES generation should be skipped due to undefined residues/linkages"""
@@ -96,11 +86,11 @@ def main():
                 except Exception as smiles_exc:
                   smiles_failures.append(f"SMILES error for '{seq}': {smiles_exc}")
             try:
-              drawing = GlycoDraw(canonical, suppress=True)
+              drawing = GlycoDraw(canonical, suppress = True)
               svg_string = drawing.as_svg()
-              rendered_svg = pdf_to_svg_bytes(svg_string)
-              svg_b64 = base64.b64encode(rendered_svg.encode("utf-8")).decode("utf-8")
-              svg_drawings.append((canonical, svg_b64, rendered_svg, svg_string))
+              del drawing
+              svg_b64 = base64.b64encode(pdf_to_svg_bytes(svg_string).encode("utf-8")).decode("utf-8")
+              svg_drawings.append((canonical, svg_b64, svg_string))
             except Exception as e:
               svg_drawings.append((canonical, None, None, None))
           except Exception as e:
@@ -131,7 +121,7 @@ def main():
         st.text_area("Canonicalized Sequences", "\n".join(output_sequences), height=200)
       
       # Display drawings in a scrollable area if any drawings were created
-      if any(drawing for _, drawing, _, _ in svg_drawings):
+      if any(drawing for _, drawing, _ in svg_drawings):
         st.markdown("### Glycan Visualizations using GlycoDraw")
 
         # Create a scrollable area for the drawings
@@ -155,7 +145,7 @@ def main():
 
         # Start the container
         glycan_html = '<div class="glycan-container">'
-        for sequence, drawing, _, _ in svg_drawings:
+        for sequence, drawing, _ in svg_drawings:
           if drawing:
             glycan_html += f'<div class="glycan-item"><p><b>{sequence}</b></p>'
             glycan_html += f'<img src="data:image/svg+xml;base64,{drawing}" alt="{sequence}" style="max-width:100%;"/></div>'
@@ -163,7 +153,7 @@ def main():
         st.markdown(glycan_html, unsafe_allow_html=True)
         
         # Create download all button
-        valid_pdfs = [(seq, svg_content) for seq, _, _, svg_content in svg_drawings if svg_content]
+        valid_pdfs = [(seq, svg_content) for seq, _, svg_content in svg_drawings if svg_content]
         if valid_pdfs:
           zip_buffer = BytesIO()
           with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
