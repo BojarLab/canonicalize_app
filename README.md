@@ -8,10 +8,13 @@ This tool provides a convenient interface to convert glycan sequences into their
 
 ## Features
 
-- Easy-to-use web interface
-- Batch processing of multiple sequences
+- Easy-to-use web interface, with paste-in or file upload (.txt/.csv) input
+- Batch processing of multiple sequences across IUPAC-extended, LinearCode, GlycoCT, WURCS, Oxford, GLYCAM, GlycoWorkBench, CSDB-linear, KCF, GlyConnect, and GlyTouCan formats
 - Instant conversion using the `canonicalize_iupac` function from glycowork
-- Error handling for invalid sequences
+- Optional SMILES generation via `IUPAC_to_SMILES`, with automatic skipping of ambiguous sequences
+- SNFG structure rendering with `GlycoDraw`, downloadable individually or as a PDF archive
+- Downloadable canonicalized sequences (`.txt`) and SMILES tables (`.csv`)
+- Error handling for invalid sequences, plus a built-in GitHub issue reporter
 
 ## Usage
 
