@@ -1,3 +1,2 @@
 streamlit
-glyles>=1.2.3a0
-glycowork[chem]==1.9.0
+glycowork==1.10.0

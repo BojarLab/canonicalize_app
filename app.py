@@ -1,8 +1,9 @@
 import streamlit as st
 import urllib.parse
-from glycowork.motif.processing import canonicalize_iupac, iupac_to_smiles
+from glycowork.motif.processing import canonicalize_iupac, canonicalize_composition
+from glycowork.motif.smiles import glycan_to_smiles, GlycanSMILESError
 from glycowork.motif.draw import GlycoDraw
-from glycorender.render import convert_svg_to_pdf, pdf_to_svg_bytes
+from glycorender.render import convert_svg_to_pdf
 import base64
 from io import BytesIO
 import zipfile
@@ -12,33 +13,35 @@ import os
 import html
 import pandas as pd
 MAX_SEQUENCES = 500
-AMBIGUOUS_MONO_PATTERN = re.compile(r"(?<![A-Za-z])(?:dHex|Hex|Pen)")
 
 @st.cache_data(show_spinner = False)
-def process_sequence(seq, want_smiles, compact, vertical, show_linkage):
+def process_sequence(seq, want_smiles, compact, vertical, show_linkage, shadow, compositions):
   try:
-    canonical = canonicalize_iupac(seq)
+    canonical = canonicalize_composition(seq, as_string = True) if compositions else canonicalize_iupac(seq)
+    if not canonical:
+      raise ValueError("no monosaccharides recognized")
   except Exception as e:
     return {"input": seq, "canonical": None, "error": f"Canonicalization failed for '{seq}': {e}", "smiles": None, "ambiguous": False, "svg_b64": None, "svg": None}
+  if compositions:
+    return {"input": seq, "canonical": canonical, "error": None, "smiles": None, "ambiguous": False, "svg_b64": None, "svg": None}
   smiles, ambiguous = None, False
   if want_smiles:
-    if has_ambiguous_components(canonical):
+    try:
+      smiles = glycan_to_smiles(canonical, strict = True)
+    except GlycanSMILESError:
       ambiguous = True
-    else:
-      try:
-        smiles = iupac_to_smiles([canonical])[0]
-      except Exception as e:
-        smiles = f"Error: {e}"
+    except Exception as e:
+      smiles = f"Error: {e}"
   svg_b64, svg = None, None
   try:
-    svg = GlycoDraw(canonical, compact = compact, vertical = vertical, show_linkage = show_linkage, suppress = True).as_svg()
-    svg_b64 = base64.b64encode(pdf_to_svg_bytes(svg).encode("utf-8")).decode("utf-8")
+    svg = GlycoDraw(canonical, compact = compact, vertical = vertical, show_linkage = show_linkage, shadow = shadow, suppress = True).as_svg()
+    svg_b64 = base64.b64encode(convert_svg_to_pdf(svg, None, return_canvas = True, shadow = shadow).to_svg().encode("utf-8")).decode("utf-8")
   except Exception:
     pass
   return {"input": seq, "canonical": canonical, "error": None, "smiles": smiles, "ambiguous": ambiguous, "svg_b64": svg_b64, "svg": svg}
 
 @st.cache_data(show_spinner = "Rendering PDFs...")
-def build_zip(pairs):
+def build_zip(pairs, shadow):
   zip_buffer = BytesIO()
   with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
     for i, (sequence, svg_content) in enumerate(pairs):
@@ -46,21 +49,13 @@ def build_zip(pairs):
       with tempfile.NamedTemporaryFile(mode = 'wb', suffix = '.pdf', delete = False) as temp_file:
         temp_pdf_path = temp_file.name
       try:
-        convert_svg_to_pdf(svg_content, temp_pdf_path)
+        convert_svg_to_pdf(svg_content, temp_pdf_path, shadow = shadow)
         with open(temp_pdf_path, 'rb') as f:
           zip_file.writestr(f"glycan_{i+1:03d}_{safe_filename}.pdf", f.read())
       finally:
         if os.path.exists(temp_pdf_path):
           os.unlink(temp_pdf_path)
   return zip_buffer.getvalue()
-
-def has_ambiguous_components(sequence):
-  """Return True if SMILES generation should be skipped due to undefined residues/linkages"""
-  if "?" in sequence:
-    return True
-  if any(marker in sequence for marker in ("/", "{", "}")):
-    return True
-  return bool(AMBIGUOUS_MONO_PATTERN.search(sequence))
 
 def main():
   st.set_page_config(page_title = "Glycan Sequence Canonicalizer", layout = "wide")
@@ -70,11 +65,14 @@ def main():
   uploaded = st.file_uploader("...or upload a .txt/.csv file", type = ["txt", "csv"])
   if uploaded is not None:
     input_text = uploaded.getvalue().decode("utf-8", errors = "replace")
-  include_smiles = st.checkbox("Include SMILES output for each sequence")
-  c1, c2, c3 = st.columns(3)
-  compact = c1.checkbox("Compact drawings")
-  vertical = c2.checkbox("Vertical drawings")
-  show_linkage = c3.checkbox("Show linkages", value = True)
+  c0, c1 = st.columns(2)
+  include_smiles = c0.checkbox("Include SMILES output for each sequence")
+  compositions = c1.checkbox("Inputs are compositions (e.g., Hex5HexNAc4Fuc1Neu5Ac2)")
+  c2, c3, c4, c5 = st.columns(4)
+  compact = c2.checkbox("Compact drawings")
+  vertical = c3.checkbox("Vertical drawings")
+  show_linkage = c4.checkbox("Show linkages", value = True)
+  shadow = c5.checkbox("Drop shadow")
   if st.button("Convert"):
     if not input_text.strip():
       st.error("Please enter at least one sequence.")
@@ -103,11 +101,11 @@ def main():
       progress = st.progress(0.0, text = "Processing sequences...")
       results = []
       for n, seq in enumerate(input_sequences, 1):
-        results.append(process_sequence(seq, include_smiles, compact, vertical, show_linkage))
+        results.append(process_sequence(seq, include_smiles, compact, vertical, show_linkage, shadow, compositions))
         progress.progress(n / len(input_sequences), text = f"Processed {n}/{len(input_sequences)} sequences")
       progress.empty()
       st.session_state.results = results
-      st.session_state.smiles_on = include_smiles
+      st.session_state.smiles_on = include_smiles and not compositions
       st.session_state.pop("zip_bytes", None)
   results = st.session_state.get("results")
   if results:
@@ -120,7 +118,7 @@ def main():
       st.download_button("Download SMILES (.csv)", df.to_csv(index = False), file_name = "glycan_smiles.csv", mime = "text/csv")
       ambiguous = [r["input"] for r in results if r["ambiguous"]]
       if ambiguous:
-        st.warning("SMILES skipped for sequences with undefined residues or ambiguous bonds (Hex, '?', '/', '{ }'): " + ", ".join(ambiguous[:5]) + (" ..." if len(ambiguous) > 5 else ""))
+        st.warning("SMILES skipped for sequences with undefined residues, linkage positions, or attachment points: " + ", ".join(ambiguous[:5]) + (" ..." if len(ambiguous) > 5 else ""))
     failures = [r["error"] for r in results if r["error"]]
     if failures:
       st.error("\n".join(failures))
@@ -139,7 +137,7 @@ def main():
       glycan_html += '</div>'
       st.markdown(glycan_html, unsafe_allow_html = True)
       if st.button("Prepare PDF download"):
-        st.session_state.zip_bytes = build_zip(tuple((r["canonical"], r["svg"]) for r in drawn))
+        st.session_state.zip_bytes = build_zip(tuple((r["canonical"], r["svg"]) for r in drawn), shadow)
       if st.session_state.get("zip_bytes"):
         st.download_button("Download All PDFs as ZIP", data = st.session_state.zip_bytes, file_name = "glycan_structures.zip", mime = "application/zip")
 
