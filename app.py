@@ -1,12 +1,12 @@
 import streamlit as st
 import urllib.parse
-from glycowork.motif.processing import canonicalize_iupac, canonicalize_composition, is_composition, glycan_to_glycoct, glycan_to_iupac_extended, glycan_to_glycam, glycan_to_oxford
+from glycowork.motif.processing import canonicalize_iupac, canonicalize_composition, is_composition, glycan_to_glycoct, glycan_to_wurcs, glycan_to_iupac_extended, glycan_to_glycam, glycan_to_oxford
 from glycowork.motif.tokenization import get_formula, glycan_to_mass
-from glycowork.motif.smiles import glycan_to_smiles, GlycanSMILESError
+from glycowork.motif.smiles import glycan_to_smiles, _anomeric_position, GlycanSMILESError
+from glycowork.motif.graph import glycan_to_nxGraph
 from glycowork.motif.draw import GlycoDraw
 from glycowork.glycan_data.loader import lib
-from glycorender.render import convert_svg_to_pdf, pdf_to_svg_bytes
-import base64
+from glycorender.render import convert_svg_to_pdf
 from io import BytesIO
 import zipfile
 import re
@@ -15,12 +15,50 @@ import os
 import html
 import pandas as pd
 MAX_SEQUENCES = 500
-EXPORTERS = {"SMILES": lambda g: glycan_to_smiles(g, strict = True), "GlycoCT": glycan_to_glycoct, "IUPAC-extended": glycan_to_iupac_extended, "GLYCAM": glycan_to_glycam, "Oxford": glycan_to_oxford, "Formula": get_formula, "Monoisotopic mass": lambda g: round(glycan_to_mass(g), 4)}
+EXPORTERS = {"SMILES": lambda g: glycan_to_smiles(g, strict = True), "GlycoCT": glycan_to_glycoct, "WURCS": glycan_to_wurcs, "IUPAC-extended": glycan_to_iupac_extended, "GLYCAM": glycan_to_glycam, "Oxford": glycan_to_oxford, "Formula": get_formula, "Monoisotopic mass": lambda g, **options: round(glycan_to_mass(g, **options), 4)}
+MASS_FORMATS = ("Formula", "Monoisotopic mass")
+SAMPLE_PREPS = {"Underivatized": "underivatized", "Permethylated": "permethylated", "Deuteropermethylated": "deuteropermethylated", "Peracetylated": "peracetylated"}
+REDUCING_ENDS = {"Free": None, "Reduced (NaBH4)": "reduced", "Reduced (NaBD4)": "reduced_D", "2-AA": "2AA", "2-AB": "2AB", "Procainamide": "procainamide", "PA": "PA", "APTS": "APTS", "aminoxyTMT": "aminoxyTMT", "Girard's P": "GirardP", "Benzyl glycoside": "benzyl"}
 COMPOSITION_FORMATS = {"Shorthand (H5N4F1A2)": "shorthand", "Byonic / MSFragger (HexNAc(4)Hex(5)...)": "byonic", "GlycReSoft ({Hex:5; HexNAc:4; ...})": "glycresoft"}
+MULTILINE_RECORDS = (("RES", ""), ("ENTRY", "///"), ("<?xml", "</sugar>"), ("<sugar", "</sugar>"))
+GLYCOCT_SECTIONS = ("RES", "LIN", "REP", "UND", "ALT", "NON")
+
+def split_sequences(text):
+  "One sequence per line, except that a multi-line GlycoCT, KCF, or GlycoCT XML record stays whole"
+  sequences, closer, previous = [], None, ""
+  for line in map(str.strip, text.splitlines()):
+    # A RES line in GlycoCT's UND and REP sections continues its record; any other starts the next one
+    starts = line.startswith(("RES", "ENTRY")) and not previous.startswith(("SubtreeLinkageID", "REP"))
+    # GlycoCT has no closing line, so its record also ends at the first line that is neither a section nor numbered ("1b:...")
+    if closer is not None and line and not starts and (closer or ":" in line or line in GLYCOCT_SECTIONS):
+      sequences[-1] += "\n" + line
+      if closer and line.endswith(closer):
+        closer = None
+    elif line:
+      sequences.append(line)
+      closer = next((end for start, end in MULTILINE_RECORDS if line.startswith(start) and not (end and line.endswith(end))), None)
+    else:
+      closer = None
+    previous = line
+  return sequences
+
+def blocked_reducing_end(glycan, modification):
+  "Whether a glycan has no free reducing end for this modification: an alditol only takes reduction; an aldonic acid, inositol, anomeric aglycone, or residue linked through its anomeric carbon (sucrose, trehalose) nothing"
+  token = re.split(r"[)\]}]", glycan)[-1]
+  if not modification:
+    return False
+  if token.endswith("-ol"):
+    return modification not in ("reduced", "reduced_D")
+  try:
+    anomeric = _anomeric_position(token)
+  except GlycanSMILESError:  # aglycones without a SMILES (1Ser, 1Fer, 1Bn) sit on an aldose's C1
+    anomeric = 1
+  graph = glycan_to_nxGraph(glycan.split("}")[-1])  # floating parts are numbered after the root
+  return anomeric is None or token.endswith(("-onic", "-aric")) or bool(re.search(rf"(?<![\d,]){anomeric}(?:[A-Z]|,\d+-Anhydro)", token)) or any(graph.nodes[n]["string_labels"].split("-")[-1] == str(anomeric) for n in graph.neighbors(max(graph.nodes)))
 
 @st.cache_data(show_spinner = False)
-def process_sequence(seq, formats, compact, vertical, show_linkage, shadow, sticker, compositions, comp_format):
-  row = {"input": seq, "canonical": None, "error": None, "is_comp": compositions, "formats": {}, "ambiguous": False, "svg_b64": None, "svg": None}
+def process_sequence(seq, formats, compact, vertical, show_linkage, shadow, sticker, compositions, comp_format, sample_prep, modification):
+  row = {"input": seq, "canonical": None, "error": None, "is_comp": compositions, "formats": {}, "ambiguous": False, "unrecognized": False, "img": None, "img_dark": None, "svg": None}
   try:
     if not compositions:
       try:
@@ -38,18 +76,21 @@ def process_sequence(seq, formats, compact, vertical, show_linkage, shadow, stic
   except Exception as e:
     row["error"] = f"Canonicalization failed for '{seq}': {e}"
     return row
+  row["unrecognized"] = not row["is_comp"] and "(" not in shorthand and shorthand not in lib
   for name in formats:
-    if row["is_comp"] and name not in ("Formula", "Monoisotopic mass"):
+    if (row["is_comp"] and name not in MASS_FORMATS) or (name in MASS_FORMATS and not row["is_comp"] and blocked_reducing_end(shorthand, modification)):
       continue
     try:
-      row["formats"][name] = EXPORTERS[name](shorthand)
+      row["formats"][name] = EXPORTERS[name](shorthand, **({"sample_prep": sample_prep, "modification": modification} if name in MASS_FORMATS else {}))
     except GlycanSMILESError:
       row["ambiguous"] = True
     except Exception:
       pass
   try:
-    row["svg"] = GlycoDraw(shorthand, compact = compact, vertical = vertical, show_linkage = show_linkage, shadow = shadow, sticker = sticker, suppress = True).as_svg()
-    row["svg_b64"] = base64.b64encode(pdf_to_svg_bytes(row["svg"], shadow = shadow, sticker = sticker).encode("utf-8")).decode("utf-8")
+    drawing = GlycoDraw(shorthand, compact = compact, vertical = vertical, show_linkage = show_linkage, shadow = shadow, sticker = sticker, suppress = True)
+    row["svg"] = drawing.as_svg()
+    row["img"] = drawing.as_markdown(size = drawing.dim)
+    row["img_dark"] = drawing.as_sticker().as_markdown(size = drawing.dim)
   except Exception:
     pass
   return row
@@ -78,8 +119,13 @@ def main():
   input_text = st.text_area("Input Sequences (one per line)", height = 200)
   uploaded = st.file_uploader("...or upload a .txt/.csv file", type = ["txt", "csv"])
   if uploaded is not None:
-    input_text = uploaded.getvalue().decode("utf-8", errors = "replace")
+    input_text = uploaded.getvalue().decode("utf-8-sig", errors = "replace")
   formats = st.multiselect("Also convert to", list(EXPORTERS), help = "Compositions only get formula and mass. A cell stays empty where the format cannot express the glycan: Oxford needs an N-glycan, GLYCAM every linkage defined, and no export takes floating parts or repeating units.")
+  prep, end = "Underivatized", "Free"
+  if set(formats) & set(MASS_FORMATS):
+    c7, c8 = st.columns(2)
+    prep = c7.selectbox("Sample preparation", list(SAMPLE_PREPS), help = "Applies to formula and mass.")
+    end = c8.selectbox("Reducing end", list(REDUCING_ENDS), help = "Reduction or label at the reducing end, applied to formula and mass. Cells stay empty where nothing can carry it: an alditol (-ol) already counts as reduced and takes no label, and an aldonic acid (-onic), inositol, anomeric aglycone (1Ser, 1Cer, 1Me), or residue linked through its anomeric carbon (sucrose, trehalose) has no free reducing end.")
   c0, c1 = st.columns(2)
   compositions = c0.checkbox("Treat every input as a composition", help = "Compositions such as H5N4F1A2, Hex5HexNAc4Fuc1Neu5Ac2 or HexNAc(4)Hex(5) are detected automatically; tick this for all-digit codes like 5421 (Hex/HexNAc/Neu5Ac/dHex).")
   comp_format = COMPOSITION_FORMATS[c1.selectbox("Composition output", list(COMPOSITION_FORMATS))]
@@ -88,40 +134,24 @@ def main():
   vertical = c3.checkbox("Vertical drawings")
   show_linkage = c4.checkbox("Show linkages", value = True)
   shadow = c5.checkbox("Drop shadow")
-  sticker = c6.checkbox("Sticker")
+  sticker = c6.checkbox("Sticker", help = "Die-cut style for the drawings and PDFs. On a dark theme, the drawings on the page are always stickers.")
   if st.button("Convert"):
     if not input_text.strip():
       st.error("Please enter at least one sequence.")
     else:
-      lines = input_text.strip().split("\n")
-      input_sequences = []
-      i = 0
-      while i < len(lines):
-        line = lines[i].strip()
-        if not line:
-          i += 1
-          continue
-        if line.startswith("RES"):
-          glycoct_lines = [line]
-          i += 1
-          while i < len(lines) and lines[i].strip():
-            glycoct_lines.append(lines[i].strip())
-            i += 1
-          input_sequences.append("\n".join(glycoct_lines))
-        else:
-          input_sequences.append(line)
-          i += 1
+      input_sequences = split_sequences(input_text)
       if len(input_sequences) > MAX_SEQUENCES:
         st.warning(f"Input truncated to the first {MAX_SEQUENCES} sequences (received {len(input_sequences)}).")
         input_sequences = input_sequences[:MAX_SEQUENCES]
       progress = st.progress(0.0, text = "Processing sequences...")
       results = []
       for n, seq in enumerate(input_sequences, 1):
-        results.append(process_sequence(seq, tuple(formats), compact, vertical, show_linkage, shadow, sticker, compositions, comp_format))
+        results.append(process_sequence(seq, tuple(formats), compact, vertical, show_linkage, shadow, sticker, compositions, comp_format, SAMPLE_PREPS[prep], REDUCING_ENDS[end]))
         progress.progress(n / len(input_sequences), text = f"Processed {n}/{len(input_sequences)} sequences")
       progress.empty()
       st.session_state.results = results
       st.session_state.formats = formats
+      st.session_state.mass_note = ", ".join(option for option in (prep, end) if option not in ("Underivatized", "Free"))
       st.session_state.style = (shadow, sticker)
       st.session_state.pop("zip_bytes", None)
   results = st.session_state.get("results")
@@ -132,7 +162,8 @@ def main():
     if as_comp:
       st.info("Read as compositions: " + ", ".join(as_comp[:5]) + (" ..." if len(as_comp) > 5 else ""))
     if st.session_state.get("formats"):
-      df = pd.DataFrame([{"Input Sequence": r["input"], "Canonical Sequence": r["canonical"] or "", **{f: r["formats"].get(f) for f in st.session_state.formats}} for r in results])
+      note = st.session_state.mass_note
+      df = pd.DataFrame([{"Input Sequence": r["input"], "Canonical Sequence": r["canonical"] or "", **{f"{f} ({note})" if note and f in MASS_FORMATS else f: r["formats"].get(f) for f in st.session_state.formats}} for r in results])
       st.markdown("### Conversions")
       st.dataframe(df, width = 'stretch', hide_index = True)
       st.download_button("Download conversions (.csv)", df.to_csv(index = False), file_name = "glycan_conversions.csv", mime = "text/csv")
@@ -142,18 +173,22 @@ def main():
     failures = [r["error"] for r in results if r["error"]]
     if failures:
       st.error("\n".join(failures))
-    drawn = [r for r in results if r["svg_b64"]]
+    unrecognized = [r["input"] for r in results if r["unrecognized"]]
+    if unrecognized:
+      st.warning("Not recognized as glycans, please check: " + ", ".join(unrecognized[:5]) + (" ..." if len(unrecognized) > 5 else ""))
+    drawn = [r for r in results if r["img"]]
     if drawn:
       st.markdown("### Glycan Visualizations using GlycoDraw")
       st.markdown("""<style>
-.glycan-container {max-height: 500px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin-bottom: 20px; background-color: white; color: #000;}
-.glycan-item {margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid #eee;}
+.glycan-container {max-height: 500px; overflow-y: auto; border: 1px solid rgba(128, 128, 128, 0.4); padding: 10px; margin-bottom: 20px;}
+.glycan-item {margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid rgba(128, 128, 128, 0.2);}
+.glycan-item img {max-width: 100%; height: auto !important;}
 </style>""", unsafe_allow_html = True)
+      image = "img_dark" if st.context.theme.type == "dark" else "img"
       glycan_html = '<div class="glycan-container">'
       for r in drawn:
         label = html.escape(r["canonical"])
-        b64 = r["svg_b64"]
-        glycan_html += f'<div class="glycan-item"><p><b>{label}</b></p><img src="data:image/svg+xml;base64,{b64}" alt="{label}" style="max-width:100%;"/></div>'
+        glycan_html += f'<div class="glycan-item"><p><b>{label}</b></p>{r[image]}</div>'
       glycan_html += '</div>'
       st.markdown(glycan_html, unsafe_allow_html = True)
       if st.button("Prepare PDF download"):
